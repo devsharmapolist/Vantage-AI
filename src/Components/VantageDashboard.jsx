@@ -300,6 +300,11 @@ export default function VantageDashboard() {
   const [panelInsight, setPanelInsight] = useState(null);
   const [now, setNow] = useState(new Date());
   const [streamsProcessed, setStreamsProcessed] = useState(128430);
+  const [analyzeText, setAnalyzeText] = useState("");
+  const [analyzeUser, setAnalyzeUser] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState("");
+  const [activeModality, setActiveModality] = useState("text");
 
   const counterRef = useRef(1000);
   const closeTimeoutRef = useRef(null);
@@ -407,6 +412,75 @@ export default function VantageDashboard() {
     setIntentFilter((prev) => (prev === name ? "all" : name));
   }
 
+  async function analyzeAndInject() {
+    if (!analyzeText.trim()) return;
+    setAnalyzing(true);
+    setAnalyzeError("");
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          system: `You are a sentiment and intent analysis engine. Analyze the user's text and return ONLY a valid JSON object with no extra text, no markdown, no backticks. Use exactly this structure:
+{
+  "sentiment": one of "positive" | "neutral" | "frustrated" | "negative",
+  "intent": one of "Transactional" | "Navigational" | "Informational",
+  "intentLevel": one of "High" | "Medium" | "Low",
+  "summary": a one-sentence summary of what the user is expressing (max 120 chars),
+  "snippet": a one-sentence analysis note about tone and language signals detected (max 160 chars),
+  "action": a recommended action for a support or product team (max 120 chars)
+}`,
+          messages: [{ role: "user", content: analyzeText.trim() }],
+        }),
+      });
+      const data = await response.json();
+      const raw = data.content?.map((b) => b.text || "").join("") || "";
+      const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
+
+      const validSentiments = ["positive", "neutral", "frustrated", "negative"];
+      const validIntents = ["Transactional", "Navigational", "Informational"];
+      const validLevels = ["High", "Medium", "Low"];
+      if (
+        !validSentiments.includes(parsed.sentiment) ||
+        !validIntents.includes(parsed.intent) ||
+        !validLevels.includes(parsed.intentLevel)
+      ) throw new Error("Invalid fields in AI response");
+
+      counterRef.current += 1;
+      const newId = `ai-${counterRef.current}`;
+      const newInsight = {
+        id: newId,
+        modality: "text",
+        sentiment: parsed.sentiment,
+        intent: parsed.intent,
+        intentLevel: parsed.intentLevel,
+        summary: parsed.summary,
+        snippet: `Original input: "${analyzeText.trim().slice(0, 100)}${analyzeText.length > 100 ? "…" : ""}". ${parsed.snippet}`,
+        action: parsed.action,
+        user: analyzeUser.trim() || `User #${Math.floor(Math.random() * 9000) + 1000}`,
+        timestamp: new Date(),
+        status: "new",
+        isNew: true,
+      };
+
+      setInsights((prev) => [newInsight, ...prev].slice(0, 40));
+      setStreamsProcessed((prev) => prev + 1);
+      setAnalyzeText("");
+      setAnalyzeUser("");
+      openPanel(newInsight);
+
+      setTimeout(() => {
+        setInsights((prev) => prev.map((i) => (i.id === newId ? { ...i, isNew: false } : i)));
+      }, 2400);
+    } catch (err) {
+      setAnalyzeError("Analysis failed. Check your connection and try again.");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[#0B0F17] text-[#E8ECF4] font-sans">
       <style>{`
@@ -451,6 +525,114 @@ export default function VantageDashboard() {
           </div>
         </div>
       </header>
+
+      {/* Live text analysis input */}
+      <section className="px-5 sm:px-8 pt-6">
+        <div className="rounded-xl border border-[#3FD6C4]/30 bg-[#121826] p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-7 h-7 rounded-md bg-[#3FD6C4]/15 flex items-center justify-center">
+              <Zap size={14} className="text-[#3FD6C4]" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold">Live Analysis</h2>
+              <p className="text-xs text-[#8993A8]">Submit a data stream for real-time sentiment and intent analysis</p>
+            </div>
+          </div>
+
+          {/* Modality selector */}
+          <div className="flex flex-wrap gap-2 mb-4">
+            {Object.entries(MODALITY_CONFIG).map(([key, cfg]) => {
+              const Icon = cfg.icon;
+              const active = activeModality === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => setActiveModality(key)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors"
+                  style={active
+                    ? { backgroundColor: `${cfg.color}1F`, borderColor: `${cfg.color}60`, color: cfg.color }
+                    : { backgroundColor: "transparent", borderColor: "#232B3D", color: "#8993A8" }
+                  }
+                >
+                  <Icon size={12} />
+                  {cfg.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Text mode */}
+          {activeModality === "text" && (
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                value={analyzeUser}
+                onChange={(e) => setAnalyzeUser(e.target.value)}
+                placeholder="Your name (optional)"
+                className="w-full sm:w-44 shrink-0 bg-[#0B0F17] border border-[#232B3D] rounded-lg px-3 py-2.5 text-sm text-[#E8ECF4] placeholder-[#8993A8] focus:outline-none focus:border-[#3FD6C4]/50 transition-colors"
+              />
+              <input
+                type="text"
+                value={analyzeText}
+                onChange={(e) => setAnalyzeText(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && !analyzing && analyzeAndInject()}
+                placeholder="e.g. I can't find the export button anywhere, this is really frustrating..."
+                className="flex-1 bg-[#0B0F17] border border-[#232B3D] rounded-lg px-3 py-2.5 text-sm text-[#E8ECF4] placeholder-[#8993A8] focus:outline-none focus:border-[#3FD6C4]/50 transition-colors"
+              />
+              <button
+                onClick={analyzeAndInject}
+                disabled={analyzing || !analyzeText.trim()}
+                className="shrink-0 flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ backgroundColor: analyzing ? "#1A2233" : "#3FD6C4", color: analyzing ? "#8993A8" : "#0B0F17" }}
+              >
+                {analyzing ? (
+                  <>
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-[#8993A8] border-t-transparent animate-spin" />
+                    Analyzing
+                  </>
+                ) : (
+                  <>
+                    <Zap size={14} />
+                    Analyze
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Under construction mode for other modalities */}
+          {activeModality !== "text" && (
+            <div className="flex flex-col items-center justify-center py-6 gap-3 select-none">
+              <pre className="text-[#3FD6C4] text-xs leading-tight font-mono text-center">{`
+  /\\_/\\   
+ ( o.o )  
+  > ^ <   
+ /|   |\\  
+(_|   |_) `}
+              </pre>
+              <div className="text-center">
+                <p className="text-sm font-semibold text-[#E8ECF4]">
+                  {MODALITY_CONFIG[activeModality].label} analysis — under construction
+                </p>
+                <p className="text-xs text-[#8993A8] mt-1">
+                  This cat is working very hard on it. Progress: <span className="text-[#F2B84B] font-mono">ERROR</span>
+                </p>
+              </div>
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-[#232B3D] bg-[#0B0F17]">
+                <span className="w-2 h-2 rounded-full bg-[#FB7C86] animate-pulse" />
+                <span className="text-[11px] font-mono text-[#8993A8]">build_status: catastrophic_failure</span>
+              </div>
+            </div>
+          )}
+
+          {analyzeError && (
+            <p className="mt-2 text-xs text-[#FB7C86] flex items-center gap-1.5">
+              <AlertTriangle size={12} />
+              {analyzeError}
+            </p>
+          )}
+        </div>
+      </section>
 
       {/* Metrics bar */}
       <section className="px-5 sm:px-8 py-6">
